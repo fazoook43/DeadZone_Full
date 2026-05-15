@@ -9,9 +9,9 @@ on:
         default: "https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS3.0.303.0.WNOCNXM/zircon-ota_full-OS3.0.303.0.WNOCNXM-user-16.0-09c35a83d6.zip"
         type: string
       device_codename:
-        description: "Device codename matching devices/.conf"
-        required: true
-        default: "zircon"
+        description: "Device codename (e.g. garnet). Use 'auto' to detect from OTA automatically."
+        required: false
+        default: "auto"
         type: string
       build_name:
         description: "Build name"
