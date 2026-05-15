@@ -1,0 +1,4 @@
+checks:
+  - id: plan_has_props
+    type: dry_run
+    required: true

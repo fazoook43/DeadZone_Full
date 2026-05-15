@@ -1,0 +1,6 @@
+id: indonesia
+ota_codes:
+  - IDXM
+name: Indonesia
+props:
+  ro.miui.region: ID

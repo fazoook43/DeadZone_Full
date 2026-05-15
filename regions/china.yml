@@ -1,0 +1,6 @@
+id: china
+ota_codes:
+  - CNXM
+name: China
+props:
+  ro.miui.region: CN

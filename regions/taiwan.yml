@@ -1,0 +1,6 @@
+id: taiwan
+ota_codes:
+  - TWXM
+name: Taiwan
+props:
+  ro.miui.region: TW

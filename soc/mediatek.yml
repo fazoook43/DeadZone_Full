@@ -1,0 +1,14 @@
+id: mediatek
+name: MediaTek
+families:
+  - dimensity
+partition_notes:
+  - Some Xiaomi MediaTek OTAs include additional firmware images in fastboot packages.
+default_targets:
+  - framework_jar
+  - services_jar
+  - miui_framework_jar
+  - miui_services_jar
+  - powerkeeper_apk
+  - settings_apk
+  - miui_systemui_apk

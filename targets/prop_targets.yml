@@ -1,0 +1,22 @@
+targets:
+  - id: system_build_prop
+    name: system build.prop
+    type: prop
+    partition: system
+    candidate_paths:
+      - system/build.prop
+      - system/system/build.prop
+  - id: product_build_prop
+    name: product build.prop
+    type: prop
+    partition: product
+    candidate_paths:
+      - product/build.prop
+      - system/product/build.prop
+  - id: system_ext_build_prop
+    name: system_ext build.prop
+    type: prop
+    partition: system_ext
+    candidate_paths:
+      - system_ext/build.prop
+      - system/system_ext/build.prop

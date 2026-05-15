@@ -1,0 +1,305 @@
+name: DeadZone ROM Kitchen
+
+on:
+  workflow_dispatch:
+    inputs:
+      rom_url:
+        description: "OTA zip direct download URL"
+        required: true
+        default: "https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS3.0.303.0.WNOCNXM/zircon-ota_full-OS3.0.303.0.WNOCNXM-user-16.0-09c35a83d6.zip"
+        type: string
+      device_codename:
+        description: "Device codename matching devices/.conf"
+        required: true
+        default: "zircon"
+        type: string
+      build_name:
+        description: "Build name"
+        required: true
+        default: "DeadZone_v1"
+        type: string
+      zip_preset:
+        description: "Final ZIP preset"
+        required: true
+        default: "DeadZone_Gaming_V1"
+        type: choice
+        options:
+          - "DeadZone_Gaming_V1"
+          - "DeadZone_EPiC_V1"
+          - "custom"
+      final_zip_name:
+        description: "Optional custom final ZIP filename. Overrides preset."
+        required: false
+        default: ""
+        type: string
+      rom_region:
+        description: "ROM region profile. Auto detects CN/Global/India from OTA."
+        required: true
+        default: "auto"
+        type: choice
+        options:
+          - "auto"
+          - "China"
+          - "Global"
+          - "India"
+      output_type:
+        description: "Output artifact type"
+        required: true
+        default: "fastboot_zip"
+        type: choice
+        options:
+          - "super_zst"
+          - "fastboot_zip"
+          - "full_release"
+      fs_mode:
+        description: "Dynamic partition filesystem handling"
+        required: true
+        default: "erofs"
+        type: choice
+        options:
+          - "preserve"
+          - "erofs"
+      vbmeta_mode:
+        description: "vbmeta patch mode"
+        required: true
+        default: "3"
+        type: choice
+        options:
+          - "0"
+          - "1"
+          - "2"
+          - "3"
+      patch_level:
+        description: "ROM modification level"
+        required: true
+        default: "safe"
+        type: choice
+        options:
+          - "none"
+          - "safe"
+          - "full"
+      upload_pixeldrain:
+        description: "Upload final ZIP to PixelDrain"
+        required: true
+        default: true
+        type: boolean
+      notify_telegram:
+        description: "Send Telegram notification"
+        required: true
+        default: true
+        type: boolean
+      create_github_release:
+        description: "Create or update GitHub Release"
+        required: true
+        default: true
+        type: boolean
+      skip_patches:
+        description: "Skip ROM patches. false means DeadZone Phase 2 patches apply."
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  contents: write
+
+jobs:
+  kitchen:
+    name: Build DeadZone package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          echo "=== Disk before ==="
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          sudo rm -rf /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo apt-get clean
+          docker rmi $(docker image ls -aq) 2>/dev/null || true
+          echo "=== Disk after ==="
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            aria2 \
+            unzip \
+            zip \
+            p7zip-full \
+            zstd \
+            brotli \
+            lz4 \
+            jq \
+            file \
+            curl \
+            git \
+            gh \
+            ca-certificates \
+            tar \
+            xz-utils \
+            e2fsprogs \
+            erofs-utils \
+            android-sdk-libsparse-utils
+
+      - name: Setup tools
+        run: |
+          bash core/setup_tools.sh
+
+      - name: Debug tool paths
+        if: always()
+        run: |
+          echo "=== bin/ ==="
+          ls -lah bin || true
+          echo "=== tool paths ==="
+          which payload-dumper-go lpmake lpdump lpunpack simg2img img2simg zstd brotli lz4 gh || true
+          echo "=== tool verification log ==="
+          cat logs/tool-verification.log 2>/dev/null || true
+
+      - name: Run DeadZone kitchen
+        env:
+          BUILD_NAME: ${{ github.event.inputs.build_name }}
+          ZIP_PRESET: ${{ github.event.inputs.zip_preset }}
+          FINAL_ZIP_NAME: ${{ github.event.inputs.final_zip_name }}
+          ROM_REGION: ${{ github.event.inputs.rom_region }}
+          FS_MODE: ${{ github.event.inputs.fs_mode }}
+          VBMETA_MODE: ${{ github.event.inputs.vbmeta_mode }}
+          PATCH_LEVEL: ${{ github.event.inputs.patch_level }}
+          UPLOAD_PIXELDRAIN: ${{ github.event.inputs.upload_pixeldrain }}
+          NOTIFY_TELEGRAM: ${{ github.event.inputs.notify_telegram }}
+          CREATE_GITHUB_RELEASE: ${{ github.event.inputs.create_github_release }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          chmod +x main.sh core/*.sh bin/* 2>/dev/null || true
+          bash -n main.sh core/*.sh
+          ./main.sh \
+            "${{ github.event.inputs.rom_url }}" \
+            "${{ github.event.inputs.device_codename }}" \
+            "${{ github.event.inputs.skip_patches }}" \
+            "${{ github.event.inputs.output_type }}" \
+            "${{ github.event.inputs.fs_mode }}" \
+            "${{ github.event.inputs.vbmeta_mode }}" \
+            "${{ github.event.inputs.patch_level }}"
+
+      - name: Output info
+        if: always()
+        run: |
+          echo "=== output/ ==="
+          ls -lh output/ 2>/dev/null || true
+          echo "=== output/images/ ==="
+          ls -lh output/images/ 2>/dev/null || true
+          echo "=== output/logs/ ==="
+          ls -lh output/logs/ 2>/dev/null || true
+          echo "=== output_final/ ==="
+          ls -lh output_final/ 2>/dev/null || true
+          echo "=== partitions.tsv ==="
+          cat partitions.tsv 2>/dev/null || true
+
+      - name: Send Telegram logs
+        if: always() && github.event.inputs.notify_telegram == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_STATUS: ${{ job.status }}
+          DEVICE_CODENAME: ${{ github.event.inputs.device_codename }}
+          BUILD_NAME: ${{ github.event.inputs.build_name }}
+          ZIP_PRESET: ${{ github.event.inputs.zip_preset }}
+          FINAL_ZIP_NAME: ${{ github.event.inputs.final_zip_name }}
+          ROM_REGION: ${{ github.event.inputs.rom_region }}
+          PATCH_LEVEL: ${{ github.event.inputs.patch_level }}
+        run: |
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "Telegram secrets missing; skip logs notification"
+            exit 0
+          fi
+
+          rm -rf telegram_logs_pack telegram_logs.zip telegram_message.txt
+          mkdir -p telegram_logs_pack
+
+          cp -r logs telegram_logs_pack/root_logs 2>/dev/null || true
+          cp -r output/logs telegram_logs_pack/output_logs 2>/dev/null || true
+          cp partitions.tsv telegram_logs_pack/partitions.tsv 2>/dev/null || true
+
+          for f in build_info.txt upload_links.txt sha256sums.txt *.zip.sha256; do
+            cp "output_final/$f" "telegram_logs_pack/$f" 2>/dev/null || true
+          done
+
+          {
+            echo "DeadZone build logs"
+            echo "status=${RUN_STATUS}"
+            echo "build=${BUILD_NAME}"
+            echo "device=${DEVICE_CODENAME}"
+            echo "zip_preset=${ZIP_PRESET}"
+            echo "final_zip_name=${FINAL_ZIP_NAME:-preset}"
+            echo "rom_region=${ROM_REGION}"
+            echo "patch_level=${PATCH_LEVEL}"
+            echo "run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            date -u
+          } > telegram_logs_pack/status.txt
+
+          zip -qr telegram_logs.zip telegram_logs_pack || true
+
+          caption="DeadZone ${BUILD_NAME}/${DEVICE_CODENAME} logs | status=${RUN_STATUS}"
+
+          if [ ! -s telegram_logs.zip ]; then
+            printf '%s\n%s\n' "$caption" "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" > telegram_message.txt
+            curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d "chat_id=${TELEGRAM_CHAT_ID}" \
+              --data-urlencode "text@telegram_message.txt" || true
+            exit 0
+          fi
+
+          size="$(stat -c%s telegram_logs.zip)"
+          max="$((49 * 1024 * 1024))"
+
+          if [ "$size" -gt "$max" ]; then
+            {
+              echo "$caption"
+              echo "logs.zip is larger than Telegram upload limit."
+              echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            } > telegram_message.txt
+            curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d "chat_id=${TELEGRAM_CHAT_ID}" \
+              --data-urlencode "text@telegram_message.txt" || true
+            exit 0
+          fi
+
+          curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+            -F "chat_id=${TELEGRAM_CHAT_ID}" \
+            -F "caption=${caption}" \
+            -F "document=@telegram_logs.zip" || true
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deadzone-${{ github.event.inputs.device_codename }}-failure-logs
+          path: |
+            output/logs/
+            logs/
+            partitions.tsv
+            telegram_logs.zip
+          retention-days: 7
+
+      - name: Upload build artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deadzone-${{ github.event.inputs.device_codename }}-${{ github.event.inputs.output_type }}
+          path: |
+            output/super.img.zst
+            output/images/super.img
+            output_final/
+            output/logs/
+            partitions.tsv
+            telegram_logs.zip
+          retention-days: 7

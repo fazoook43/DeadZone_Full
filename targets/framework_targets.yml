@@ -1,0 +1,29 @@
+targets:
+  - id: framework_jar
+    name: framework.jar
+    type: jar
+    partition: system
+    candidate_paths:
+      - system/framework/framework.jar
+      - system/system/framework/framework.jar
+  - id: services_jar
+    name: services.jar
+    type: jar
+    partition: system
+    candidate_paths:
+      - system/framework/services.jar
+      - system/system/framework/services.jar
+  - id: miui_framework_jar
+    name: miui-framework.jar
+    type: jar
+    partition: system_ext
+    candidate_paths:
+      - system_ext/framework/miui-framework.jar
+      - framework/miui-framework.jar
+  - id: miui_services_jar
+    name: miui-services.jar
+    type: jar
+    partition: system_ext
+    candidate_paths:
+      - system_ext/framework/miui-services.jar
+      - framework/miui-services.jar

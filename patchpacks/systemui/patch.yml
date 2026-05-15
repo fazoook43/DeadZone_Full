@@ -1,0 +1,26 @@
+id: systemui_common
+name: MiuiSystemUI APK discovery pack
+type: apk
+platforms:
+  - hyperos3
+  - hyperos2
+  - hyperos1
+  - miui
+flavors:
+  - DeadZone_Gaming_V1
+  - DeadZone_EPiC_V1
+  - DeadZone_Legend_V1
+android_api:
+  min: 29
+  max: 36
+targets:
+  - miui_systemui_apk
+operations:
+  - op: apk_patch
+    mode: dry_run_only
+only_if: []
+skip_if: []
+requires_path: []
+verify:
+  - target_discovery
+rollback_notes: No APK mutations are performed in the initial architecture pass.

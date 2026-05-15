@@ -1,0 +1,26 @@
+targets:
+  - id: powerkeeper_apk
+    name: PowerKeeper.apk
+    type: apk
+    partition: system_ext
+    candidate_paths:
+      - system_ext/app/PowerKeeper/PowerKeeper.apk
+      - app/PowerKeeper/PowerKeeper.apk
+  - id: settings_apk
+    name: Settings.apk
+    type: apk
+    partition: system_ext
+    candidate_paths:
+      - system_ext/priv-app/Settings/Settings.apk
+      - system_ext/priv-app/settings/settings.apk
+      - priv-app/Settings/Settings.apk
+      - priv-app/settings/settings.apk
+  - id: miui_systemui_apk
+    name: MiuiSystemUI.apk
+    type: apk
+    partition: system_ext
+    candidate_paths:
+      - system_ext/priv-app/MiuiSystemUI/MiuiSystemUI.apk
+      - system_ext/priv-app/MiuiSystemUi/MiuiSystemUi.apk
+      - priv-app/MiuiSystemUI/MiuiSystemUI.apk
+      - priv-app/MiuiSystemUi/MiuiSystemUi.apk

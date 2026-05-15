@@ -1,0 +1,21 @@
+id: hyperos1
+name: HyperOS 1
+families:
+  - hyperos
+android_api:
+  min: 33
+  max: 34
+patchpacks:
+  - patchpacks/framework/hyperos1
+  - patchpacks/settings
+  - patchpacks/systemui
+  - patchpacks/powerkeeper
+  - patchpacks/dna
+  - patchpacks/props
+  - patchpacks/overlays
+  - patchpacks/apps
+target_groups:
+  - framework
+  - apps
+  - overlays
+  - props

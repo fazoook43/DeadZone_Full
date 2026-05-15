@@ -1,0 +1,6 @@
+id: global
+ota_codes:
+  - MIXM
+name: Global
+props:
+  ro.miui.region: GLOBAL

@@ -1,0 +1,4 @@
+checks:
+  - id: dry_run_placeholder
+    type: dry_run
+    required: false

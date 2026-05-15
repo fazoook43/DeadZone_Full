@@ -1,0 +1,15 @@
+targets:
+  - id: product_overlays
+    name: Product overlays
+    type: overlay
+    partition: product
+    candidate_paths:
+      - product/overlay
+      - system/product/overlay
+  - id: system_ext_overlays
+    name: System extension overlays
+    type: overlay
+    partition: system_ext
+    candidate_paths:
+      - system_ext/overlay
+      - system/system_ext/overlay

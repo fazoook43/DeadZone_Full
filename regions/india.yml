@@ -1,0 +1,6 @@
+id: india
+ota_codes:
+  - INXM
+name: India
+props:
+  ro.miui.region: IN

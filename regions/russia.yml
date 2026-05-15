@@ -1,0 +1,6 @@
+id: russia
+ota_codes:
+  - RUXM
+name: Russia
+props:
+  ro.miui.region: RU

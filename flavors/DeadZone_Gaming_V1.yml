@@ -1,0 +1,28 @@
+id: DeadZone_Gaming_V1
+aliases:
+  - DeadZone_Gaming
+name: DeadZone Gaming
+version: v1
+profile: gaming
+patch_levels:
+  safe:
+    patchpacks:
+      - patchpacks/dna
+      - patchpacks/props
+      - patchpacks/powerkeeper
+  full:
+    patchpacks:
+      - patchpacks/framework
+      - patchpacks/settings
+      - patchpacks/systemui
+      - patchpacks/powerkeeper
+      - patchpacks/dna
+      - patchpacks/props
+      - patchpacks/overlays
+      - patchpacks/apps
+operations:
+  - id: gaming_build_prop
+    op: append_prop_once
+    target: system_build_prop
+    key: persist.deadzone.flavor
+    value: gaming

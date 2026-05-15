@@ -1,0 +1,6 @@
+id: europe
+ota_codes:
+  - EUXM
+name: Europe
+props:
+  ro.miui.region: EU

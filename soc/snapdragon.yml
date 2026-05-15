@@ -1,0 +1,15 @@
+id: snapdragon
+name: Qualcomm Snapdragon
+families:
+  - qcom
+  - sm
+partition_notes:
+  - Snapdragon devices may use different dynamic partition group names and firmware image sets.
+default_targets:
+  - framework_jar
+  - services_jar
+  - miui_framework_jar
+  - miui_services_jar
+  - powerkeeper_apk
+  - settings_apk
+  - miui_systemui_apk

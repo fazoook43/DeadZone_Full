@@ -1,0 +1,27 @@
+id: apps_common
+name: App injection and replacement pack
+type: app
+platforms:
+  - hyperos3
+  - hyperos2
+  - hyperos1
+  - miui
+flavors:
+  - DeadZone_Gaming_V1
+  - DeadZone_EPiC_V1
+  - DeadZone_Legend_V1
+android_api:
+  min: 29
+  max: 36
+targets: []
+operations:
+  - op: inject_app
+    mode: placeholder
+  - op: replace_app
+    mode: placeholder
+only_if: []
+skip_if: []
+requires_path: []
+verify:
+  - dry_run_placeholder
+rollback_notes: App injection and replacement are placeholders in the initial architecture pass.

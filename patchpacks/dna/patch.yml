@@ -1,0 +1,26 @@
+id: dna_common
+name: DeadZone DNA compatibility pack
+type: structural
+platforms:
+  - hyperos3
+  - hyperos2
+  - hyperos1
+  - miui
+flavors:
+  - DeadZone_Gaming_V1
+  - DeadZone_EPiC_V1
+  - DeadZone_Legend_V1
+android_api:
+  min: 29
+  max: 36
+targets:
+  - system_build_prop
+operations:
+  - op: append_prop_once
+    mode: dry_run_only
+only_if: []
+skip_if: []
+requires_path: []
+verify:
+  - plan_has_props
+rollback_notes: Property operations are dry-run only in the initial architecture pass.

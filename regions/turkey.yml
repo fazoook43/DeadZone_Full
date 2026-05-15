@@ -1,0 +1,6 @@
+id: turkey
+ota_codes:
+  - TRXM
+name: Turkey
+props:
+  ro.miui.region: TR

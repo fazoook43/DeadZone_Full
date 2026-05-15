@@ -1,0 +1,21 @@
+id: hyperos3
+name: HyperOS 3
+families:
+  - hyperos
+android_api:
+  min: 35
+  max: 36
+patchpacks:
+  - patchpacks/framework/hyperos3
+  - patchpacks/settings
+  - patchpacks/systemui
+  - patchpacks/powerkeeper
+  - patchpacks/dna
+  - patchpacks/props
+  - patchpacks/overlays
+  - patchpacks/apps
+target_groups:
+  - framework
+  - apps
+  - overlays
+  - props

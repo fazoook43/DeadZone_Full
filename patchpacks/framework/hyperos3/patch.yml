@@ -1,0 +1,26 @@
+id: framework_hyperos3
+name: HyperOS 3 framework discovery pack
+type: framework
+platforms:
+  - hyperos3
+flavors:
+  - DeadZone_Gaming_V1
+  - DeadZone_EPiC_V1
+  - DeadZone_Legend_V1
+android_api:
+  min: 35
+  max: 36
+targets:
+  - framework_jar
+  - services_jar
+  - miui_framework_jar
+  - miui_services_jar
+operations:
+  - op: jar_patch
+    mode: dry_run_only
+only_if: []
+skip_if: []
+requires_path: []
+verify:
+  - target_discovery
+rollback_notes: No mutations are performed in the initial architecture pass.

@@ -1,0 +1,27 @@
+id: DeadZone_Legend_V1
+aliases:
+  - DeadZone_Legend
+name: DeadZone Legend
+version: v1
+profile: legend
+patch_levels:
+  safe:
+    patchpacks:
+      - patchpacks/dna
+      - patchpacks/props
+  full:
+    patchpacks:
+      - patchpacks/framework
+      - patchpacks/settings
+      - patchpacks/systemui
+      - patchpacks/powerkeeper
+      - patchpacks/dna
+      - patchpacks/props
+      - patchpacks/overlays
+      - patchpacks/apps
+operations:
+  - id: legend_build_prop
+    op: append_prop_once
+    target: system_build_prop
+    key: persist.deadzone.flavor
+    value: legend
