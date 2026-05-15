@@ -1,24 +1,30 @@
 #!/usr/bin/env bash
 # LF normalized for GitHub raw
 # =============================================================================
-#  device_probe.sh — Auto-detect device codename & hardware info
+#  device_probe.sh — Auto-detect device info & super partition metadata
 #
-#  Sources of truth (in priority order):
-#    1. build.prop inside extracted system partition   (most accurate)
-#    2. OTA zip metadata  (META-INF/com/android/metadata)
-#    3. OTA filename / URL pattern parsing
-#    4. payload.bin manifest  (payload-dumper-go --list)
-#    5. User-supplied DEVICE_CODENAME env  (fallback / override)
+#  Codename policy
+#  ───────────────
+#  If CODENAME_LOCKED=true (set by main.sh when the user supplies a non-'auto'
+#  codename), the probe NEVER changes DEVICE_CODENAME.  It still runs to fill
+#  in brand, model, SoC, and — most importantly — super partition metadata.
+#
+#  SUPER_SIZE policy
+#  ─────────────────
+#  Priority (highest → lowest):
+#    1. lpdump "Block device table → Size:"  ← exact device partition size
+#    2. SUPER_SIZE_OVERRIDE env              ← manual input from workflow
+#    3. file_size of super.img               ← last resort approximation
 #
 #  Exports after probe_device_info():
-#    DEVICE_CODENAME       e.g. "garnet"
+#    DEVICE_CODENAME       e.g. "sweet"
 #    DEVICE_BRAND          e.g. "Xiaomi"
-#    DEVICE_MODEL          e.g. "Redmi Note 13 Pro 5G"
-#    DEVICE_SOC            e.g. "Snapdragon"  or  "MediaTek"
-#    DEVICE_PLATFORM       e.g. "taro"  (board platform)
+#    DEVICE_MODEL          e.g. "Redmi Note 10"
+#    DEVICE_SOC            e.g. "Snapdragon"
+#    DEVICE_PLATFORM       e.g. "sm6150"
 #    ROM_VERSION           e.g. "OS2.0.6.0.UNFEUXM"
 #    ROM_REGION            e.g. "Global"
-#    SUPER_SLOT_MODE       e.g. "VAB"  (if readable from OTA metadata)
+#    SUPER_SLOT_MODE       e.g. "VAB"
 # =============================================================================
 set -euo pipefail
 
@@ -26,7 +32,7 @@ _probe_log()  { log  "[device_probe] $*"; }
 _probe_warn() { warn "[device_probe] $*"; }
 
 # ---------------------------------------------------------------------------
-# Internal: parse a key=value line from build.prop / ota metadata
+# Internal: parse a key=value from a props file
 # ---------------------------------------------------------------------------
 _prop() {
   local file="$1"
@@ -35,10 +41,69 @@ _prop() {
 }
 
 # ---------------------------------------------------------------------------
+# _parse_super_size_from_lpdump_log
+#  Read the exact partition size from lpdump's "Block device table → Size:"
+#  This is the authoritative value — it is embedded in the super image
+#  metadata and always reflects the real on-device partition size, even when
+#  the image file has been trimmed/sparse-encoded.
+#
+#  lpdump output fragment:
+#    Block device table:
+#      Name: super
+#      First sector: 2048
+#      Size: 9663676416   ← we want this
+#      Flags: none
+# ---------------------------------------------------------------------------
+_parse_super_size_from_lpdump_log() {
+  local lpdump_log="$1"
+  [[ -s "$lpdump_log" ]] || return 1
+
+  local size
+  size=$(awk '
+    /Block device table/ { in_bdt=1 }
+    in_bdt && /^\s+Size:/ {
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^[0-9]+$/ && ($i + 0) > 1048576) {
+          print $i
+          exit
+        }
+      }
+    }
+  ' "$lpdump_log")
+
+  if [[ -n "${size:-}" ]] && (( size > 0 )); then
+    printf '%s' "$size"
+    return 0
+  fi
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# _soc_from_platform — map platform string → human-readable SoC family
+# ---------------------------------------------------------------------------
+_soc_from_platform() {
+  local plat="${1,,}"
+  case "$plat" in
+    sm8*|lahaina|taro|kalama|pineapple|crow|sun|cape|ukee|waipio|yupik|parrot|ravelin|\
+    sm6*|bengal|khaje|trinket|atoll|msm8953|msm8998|sdm660|sdm845)
+      printf 'Snapdragon' ;;
+    mt*|dimensity*|helio*)
+      printf 'MediaTek' ;;
+    exynos*|s5e*)
+      printf 'Exynos' ;;
+    tensor*|gs*)
+      printf 'Google Tensor' ;;
+    kirin*)
+      printf 'Kirin' ;;
+    *)
+      printf '%s' "$plat" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # Strategy 1: build.prop from extracted system partition
 # ---------------------------------------------------------------------------
 _probe_from_build_prop() {
-  # Try both system/ and system/system/ (Samsung/MIUI style)
   local bp=""
   for candidate in \
       "$EXTRACTED/system/build.prop" \
@@ -66,35 +131,36 @@ _probe_from_build_prop() {
   platform="$(_prop "$bp" "ro.board.platform")"
   [[ -z "$platform" ]] && platform="$(_prop "$bp" "ro.hardware")"
 
-  # Detect SoC family from platform string
   soc_hint="$(_soc_from_platform "$platform")"
 
-  # Slot info from build.prop
   slot_suffix="$(_prop "$bp" "ro.boot.slot_suffix")"
-  virtual_ab="$(_prop "$bp" "ro.virtual_ab.enabled")"
+  virtual_ab="$(_prop  "$bp" "ro.virtual_ab.enabled")"
 
-  [[ -n "$codename" ]] || return 1
+  # Update slot mode from build.prop — can upgrade AB→VAB but never downgrade
+  if [[ "$virtual_ab" == "true" ]]; then
+    SUPER_SLOT_MODE="VAB"
+  elif [[ -n "$slot_suffix" && "${SUPER_SLOT_MODE:-}" != "VAB" ]]; then
+    SUPER_SLOT_MODE="${SUPER_SLOT_MODE:-AB}"
+  fi
 
-  # Export what we found
-  DEVICE_CODENAME="${codename,,}"   # lowercase
+  # Codename: only set if not locked by user input
+  if [[ "${CODENAME_LOCKED:-false}" != "true" ]] && [[ -n "$codename" ]]; then
+    DEVICE_CODENAME="${codename,,}"
+    _probe_log "build.prop → codename=$DEVICE_CODENAME"
+  else
+    _probe_log "build.prop → codename locked as '$DEVICE_CODENAME' (skipping probe value '${codename:-?}')"
+  fi
+
   [[ -n "$brand"    ]] && DEVICE_BRAND="$brand"
   [[ -n "$model"    ]] && DEVICE_MODEL="$model"
   [[ -n "$platform" ]] && DEVICE_PLATFORM="$platform"
   [[ -n "$soc_hint" ]] && DEVICE_SOC="$soc_hint"
 
-  # Slot mode hint from build.prop
-  if [[ "$virtual_ab" == "true" ]]; then
-    SUPER_SLOT_MODE="${SUPER_SLOT_MODE:-VAB}"
-  elif [[ -n "$slot_suffix" ]]; then
-    SUPER_SLOT_MODE="${SUPER_SLOT_MODE:-AB}"
-  fi
-
-  _probe_log "build.prop → codename=$DEVICE_CODENAME brand=${DEVICE_BRAND:-?} model=${DEVICE_MODEL:-?} platform=${DEVICE_PLATFORM:-?} soc=${DEVICE_SOC:-?}"
   return 0
 }
 
 # ---------------------------------------------------------------------------
-# Strategy 2: OTA metadata file  (META-INF/com/android/metadata)
+# Strategy 2: OTA metadata (META-INF/com/android/metadata)
 # ---------------------------------------------------------------------------
 _probe_from_ota_metadata() {
   [[ -n "${ROM_FILE:-}" && -f "$ROM_FILE" ]] || return 1
@@ -106,36 +172,38 @@ _probe_from_ota_metadata() {
 
   _probe_log "Reading OTA metadata"
 
-  local codename pre_build ota_type ab_ota
+  local codename pre_build ab_ota
 
-  # pre-device field: e.g. "garnet" or "garnet_global"
   codename="$(grep -m1 '^pre-device=' "$meta_tmp" | cut -d= -f2- | tr -d '\r\n' | cut -d_ -f1 | tr '[:upper:]' '[:lower:]' || true)"
-  pre_build="$(grep -m1 '^pre-build=' "$meta_tmp" | cut -d= -f2- | tr -d '\r\n' || true)"
-  ota_type="$(grep -m1 '^ota-type=' "$meta_tmp" | cut -d= -f2- | tr -d '\r\n' || true)"
+  pre_build="$(grep -m1 '^pre-build='  "$meta_tmp" | cut -d= -f2- | tr -d '\r\n' || true)"
   ab_ota="$(grep -m1 '^ab-ota-updater=' "$meta_tmp" | cut -d= -f2- | tr -d '\r\n' || true)"
 
-  # Slot hint from ab-ota-updater field
+  # Slot hint from OTA metadata — low trust, only set if nothing else has set it
   if [[ "$ab_ota" == "true" ]]; then
     SUPER_SLOT_MODE="${SUPER_SLOT_MODE:-AB}"
   fi
 
-  # ROM version from pre-build  e.g. "garnet-user OS2.0.6.0.UNFEUXM"
-  if [[ -n "$pre_build" && -z "${ROM_VERSION:-unknown}" || "${ROM_VERSION:-}" == "unknown" ]]; then
+  # ROM version
+  if [[ -n "$pre_build" && ( -z "${ROM_VERSION:-}" || "${ROM_VERSION:-}" == "unknown" ) ]]; then
     local ver
     ver="$(printf '%s\n' "$pre_build" | grep -oE 'OS[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.[A-Z0-9]+' | head -n1 || true)"
     [[ -n "$ver" ]] && ROM_VERSION="$ver"
   fi
 
-  [[ -n "$codename" ]] || return 1
-  DEVICE_CODENAME="${codename,,}"
-  _probe_log "OTA metadata → codename=$DEVICE_CODENAME ab=${ab_ota:-?}"
+  # Codename: only set if not locked and not already set by a higher-trust source
+  if [[ "${CODENAME_LOCKED:-false}" != "true" ]] && \
+     [[ -n "$codename" && -z "${DEVICE_CODENAME:-}" ]]; then
+    DEVICE_CODENAME="${codename,,}"
+    _probe_log "OTA metadata → codename=$DEVICE_CODENAME ab=${ab_ota:-?}"
+  else
+    _probe_log "OTA metadata → codename locked or already set, skipping '${codename:-?}'"
+  fi
+
   return 0
 }
 
 # ---------------------------------------------------------------------------
-# Strategy 3: parse the OTA filename / URL
-#   Xiaomi pattern:  <codename>-ota_full-<version>-user-<...>.zip
-#   e.g. garnet-ota_full-OS2.0.6.0.UNFEUXM-user-14-...zip
+# Strategy 3: parse OTA filename / URL
 # ---------------------------------------------------------------------------
 _probe_from_filename() {
   local text="${ROM_FILE:-} ${ROM_URL:-}"
@@ -144,7 +212,6 @@ _probe_from_filename() {
   local codename=""
   local version=""
 
-  # Pattern: <codename>-ota_full-  OR  <codename>_ota_full
   codename="$(printf '%s\n' "$text" \
     | grep -oiE '[a-z][a-z0-9_]+-ota_full' \
     | head -n1 \
@@ -152,7 +219,6 @@ _probe_from_filename() {
     | tr '[:upper:]' '[:lower:]' \
     || true)"
 
-  # Fallback: first path segment after last slash that looks like a codename
   if [[ -z "$codename" ]]; then
     codename="$(printf '%s\n' "$text" \
       | grep -oE '/[a-z][a-z0-9_]+-ota' \
@@ -162,7 +228,6 @@ _probe_from_filename() {
       || true)"
   fi
 
-  # Version
   version="$(printf '%s\n' "$text" \
     | grep -oE 'OS[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.[A-Z0-9]+' \
     | head -n1 \
@@ -170,14 +235,19 @@ _probe_from_filename() {
 
   [[ -n "$codename" ]] || return 1
 
-  DEVICE_CODENAME="${codename,,}"
+  # Codename: lowest trust — only if not locked and nothing set yet
+  if [[ "${CODENAME_LOCKED:-false}" != "true" ]] && \
+     [[ -z "${DEVICE_CODENAME:-}" ]]; then
+    DEVICE_CODENAME="${codename,,}"
+    _probe_log "Filename → codename=$DEVICE_CODENAME"
+  fi
+
   [[ -n "$version" ]] && ROM_VERSION="${ROM_VERSION:-$version}"
-  _probe_log "Filename → codename=$DEVICE_CODENAME version=${ROM_VERSION:-?}"
   return 0
 }
 
 # ---------------------------------------------------------------------------
-# Strategy 4: payload-dumper-go --list  (parses metadata partition names)
+# Strategy 4: payload-dumper-go --list
 # ---------------------------------------------------------------------------
 _probe_from_payload_manifest() {
   local payload=""
@@ -191,12 +261,12 @@ _probe_from_payload_manifest() {
   payload-dumper-go --list "$payload" > "$list_out" 2>&1 || return 1
   [[ -s "$list_out" ]] || return 1
 
-  _probe_log "payload manifest available: $list_out"
+  _probe_log "payload manifest: $list_out"
 
-  # Slot mode from partition names
+  # Slot hint from partition names (low trust — can't distinguish AB from VAB)
   local has_a has_b
-  has_a="$(grep -c "_a$" "$list_out" 2>/dev/null || true)"
-  has_b="$(grep -c "_b$" "$list_out" 2>/dev/null || true)"
+  has_a="$(grep -cE "_a$" "$list_out" 2>/dev/null || true)"
+  has_b="$(grep -cE "_b$" "$list_out" 2>/dev/null || true)"
   if (( has_a > 0 && has_b > 0 )); then
     SUPER_SLOT_MODE="${SUPER_SLOT_MODE:-AB}"
   elif (( has_a == 0 && has_b == 0 )); then
@@ -204,18 +274,20 @@ _probe_from_payload_manifest() {
   fi
 
   # Some payload-dumper-go versions print device info in header
-  local codename=""
-  codename="$(grep -m1 -oiE 'device[: ]+[a-z][a-z0-9_]+' "$list_out" \
-    | grep -oiE '[a-z][a-z0-9_]+$' \
-    | tr '[:upper:]' '[:lower:]' \
-    || true)"
-  [[ -n "$codename" && -z "${DEVICE_CODENAME:-}" ]] && DEVICE_CODENAME="$codename"
+  if [[ "${CODENAME_LOCKED:-false}" != "true" ]] && [[ -z "${DEVICE_CODENAME:-}" ]]; then
+    local codename=""
+    codename="$(grep -m1 -oiE 'device[: ]+[a-z][a-z0-9_]+' "$list_out" \
+      | grep -oiE '[a-z][a-z0-9_]+$' \
+      | tr '[:upper:]' '[:lower:]' \
+      || true)"
+    [[ -n "$codename" ]] && DEVICE_CODENAME="$codename"
+  fi
 
   return 0
 }
 
 # ---------------------------------------------------------------------------
-# Strategy 5: super.img lpdump — slot mode + group info
+# Strategy 5: super.img lpdump — slot mode + super metadata
 # ---------------------------------------------------------------------------
 _probe_from_lpdump() {
   command -v lpdump >/dev/null 2>&1 || return 1
@@ -227,45 +299,20 @@ _probe_from_lpdump() {
 
     _probe_log "lpdump from $candidate"
 
-    # Slot mode
-    if grep -qi "Virtual AB: *true" "$LOGS/lpdump_probe.log"; then
-      SUPER_SLOT_MODE="${SUPER_SLOT_MODE:-VAB}"
-    elif grep -qc "Name:.*_a$" "$LOGS/lpdump_probe.log" 2>/dev/null; then
-      SUPER_SLOT_MODE="${SUPER_SLOT_MODE:-AB}"
+    # Slot mode — high trust
+    if grep -qiE "^\s*Virtual AB:\s*true" "$LOGS/lpdump_probe.log"; then
+      SUPER_SLOT_MODE="VAB"
+    elif grep -qE "^\s+Name:\s+\S+_a\s*$" "$LOGS/lpdump_probe.log" 2>/dev/null; then
+      [[ "${SUPER_SLOT_MODE:-}" != "VAB" ]] && SUPER_SLOT_MODE="${SUPER_SLOT_MODE:-AB}"
     fi
+
     return 0
   done
   return 1
 }
 
 # ---------------------------------------------------------------------------
-# _soc_from_platform — map platform string → human-readable SoC family
-# ---------------------------------------------------------------------------
-_soc_from_platform() {
-  local plat="${1,,}"
-  case "$plat" in
-    sm8*|lahaina|taro|kalama|pineapple|crow|sun|cape|ukee|waipio|yupik|parrot|ravelin)
-      printf 'Snapdragon' ;;
-    mt*|dimensity*|helio*)
-      printf 'MediaTek' ;;
-    exynos*|s5e*)
-      printf 'Exynos' ;;
-    tensor*|gs*)
-      printf 'Google Tensor' ;;
-    kirin*)
-      printf 'Kirin' ;;
-    *)
-      printf '%s' "$plat" ;;
-  esac
-}
-
-# ---------------------------------------------------------------------------
 # generate_device_conf — write devices/<codename>.conf from probed values
-#
-#  Only generates the conf if:
-#    - Auto-probe is enabled  (DEVICE_PROBE_AUTO=true, default)
-#    - The conf does NOT already exist
-#    - All required super metadata was discovered
 # ---------------------------------------------------------------------------
 generate_device_conf() {
   local codename="${DEVICE_CODENAME:-}"
@@ -278,18 +325,28 @@ generate_device_conf() {
     return 0
   fi
 
-  # We need at minimum SUPER_SIZE and GROUP_SIZE to generate a useful conf.
-  # If we don't have them yet (no lpdump ran), try once more.
+  # Ensure we have super metadata — try lpdump one more time
   if [[ -z "${SUPER_SIZE:-}" ]] || [[ -z "${DYNAMIC_PARTITION_GROUP_SIZE:-}" ]]; then
     _probe_from_lpdump || true
-    # Also try reading from lpdump.log if available
-    if [[ -f "$LOGS/lpdump.log" ]]; then
-      SUPER_SIZE="${SUPER_SIZE:-$(awk '/Metadata max size:/{found=1} found && /^Total metadata/{print $NF; exit}' "$LOGS/lpdump.log" || true)}"
-    fi
+    # Try reading from existing lpdump logs
+    for ldlog in "$LOGS/lpdump.log" "$LOGS/lpdump_probe.log" "$LOGS/lpdump_meta_probe.log"; do
+      if [[ -f "$ldlog" && -z "${SUPER_SIZE:-}" ]]; then
+        local sz
+        sz="$(_parse_super_size_from_lpdump_log "$ldlog" || true)"
+        [[ -n "${sz:-}" ]] && SUPER_SIZE="$sz"
+      fi
+    done
+  fi
+
+  # Accept SUPER_SIZE from manual override if auto-detect failed
+  if [[ -z "${SUPER_SIZE:-}" ]] && [[ -n "${SUPER_SIZE_OVERRIDE:-}" ]]; then
+    SUPER_SIZE="$SUPER_SIZE_OVERRIDE"
+    _probe_log "Using SUPER_SIZE_OVERRIDE=$SUPER_SIZE (manual input)"
   fi
 
   if [[ -z "${SUPER_SIZE:-}" ]]; then
-    _probe_warn "Cannot auto-generate $conf: SUPER_SIZE unknown (run lpdump or set manually)"
+    _probe_warn "Cannot auto-generate $conf: SUPER_SIZE unknown"
+    _probe_warn "Set SUPER_SIZE_OVERRIDE in the workflow or create $conf manually"
     return 1
   fi
   if [[ -z "${DYNAMIC_PARTITION_GROUP_SIZE:-}" ]]; then
@@ -319,8 +376,8 @@ generate_device_conf() {
 # Auto-generated by DeadZone device_probe.sh
 # Device: ${model:-$codename}  ($brand)
 # SoC: $soc  Platform: $platform
-# Verify SUPER_SIZE with: fastboot getvar partition-size:super
-# Verify GROUP_SIZE with:  lpdump <super.img>
+# SUPER_SIZE was read from: lpdump Block device table (exact partition size)
+# Verify: fastboot getvar partition-size:super
 
 DEVICE_CODENAME=$codename
 DEVICE_BRAND=$brand
@@ -360,76 +417,64 @@ EOF
 # ---------------------------------------------------------------------------
 # probe_device_info — main public function
 #
-#  Call this AFTER fetch_rom and BEFORE load_device_profile.
-#  Tries all strategies in order, exports what it finds.
+#  Call AFTER fetch_rom, BEFORE load_device_profile.
+#  Fills: DEVICE_CODENAME (unless locked), DEVICE_BRAND, DEVICE_MODEL,
+#         DEVICE_SOC, DEVICE_PLATFORM, ROM_VERSION, ROM_REGION, SUPER_SLOT_MODE
 # ---------------------------------------------------------------------------
 probe_device_info() {
-  local probe_enabled="${DEVICE_PROBE_AUTO:-true}"
-
-  # If user explicitly passed DEVICE_CODENAME and probe is disabled, skip
-  if [[ "$probe_enabled" != "true" ]]; then
-    _probe_log "DEVICE_PROBE_AUTO=false — skipping auto-probe"
-    return 0
-  fi
-
-  _probe_log "Starting device auto-probe …"
+  _probe_log "Starting device probe (CODENAME_LOCKED=${CODENAME_LOCKED:-false})"
   _probe_log "ROM_FILE=${ROM_FILE:-<none>}"
   _probe_log "ROM_URL=${ROM_URL:-<none>}"
 
-  local original_codename="${DEVICE_CODENAME:-}"
-
-  # Run strategies — each one fills in what it can
-  # (they don't die on failure, they just return 1)
-
-  # Strategy 3 first — fastest, no extraction needed yet
-  _probe_from_filename            || true
-
-  # Strategy 2 — OTA zip metadata
-  _probe_from_ota_metadata        || true
-
-  # Strategy 4 — payload manifest (needs payload.bin extracted)
-  _probe_from_payload_manifest    || true
-
-  # Strategy 5 — lpdump (needs super.img)
-  _probe_from_lpdump              || true
-
-  # Strategy 1 — build.prop (needs partitions extracted — run last)
-  _probe_from_build_prop          || true
-
-  # If we still have no codename, fall back to what user passed
-  if [[ -z "${DEVICE_CODENAME:-}" ]]; then
-    if [[ -n "$original_codename" ]]; then
-      DEVICE_CODENAME="$original_codename"
-      _probe_warn "Could not auto-detect codename; using user-supplied: $DEVICE_CODENAME"
-    else
-      die "Could not detect device codename. Pass DEVICE_CODENAME explicitly."
-    fi
+  if [[ "${CODENAME_LOCKED:-false}" == "true" ]]; then
+    _probe_log "Codename locked to '$DEVICE_CODENAME' — will only probe metadata"
   fi
 
-  # If user passed a codename but probe found something different, trust probe
-  if [[ -n "$original_codename" && "$DEVICE_CODENAME" != "${original_codename,,}" ]]; then
-    _probe_warn "Probe detected '$DEVICE_CODENAME' but user passed '$original_codename' — using probe result"
-    _probe_warn "Set DEVICE_PROBE_AUTO=false to force user-supplied codename"
+  # Run strategies from fastest → most complete.
+  # Each one skips what's already set (except build.prop which can upgrade slot mode).
+
+  # Strategy 3 (filename) — fastest, no IO
+  _probe_from_filename         || true
+
+  # Strategy 2 (OTA metadata) — reads one file from zip
+  _probe_from_ota_metadata     || true
+
+  # Strategy 4 (payload manifest) — needs payload.bin extracted
+  _probe_from_payload_manifest || true
+
+  # Strategy 5 (lpdump) — needs super.img
+  _probe_from_lpdump           || true
+
+  # Strategy 1 (build.prop) — needs full partition extraction — highest trust
+  _probe_from_build_prop       || true
+
+  # Final codename validation
+  if [[ -z "${DEVICE_CODENAME:-}" ]]; then
+    die "Could not detect device codename. Pass DEVICE_CODENAME explicitly (not 'auto')."
   fi
 
   export DEVICE_CODENAME DEVICE_BRAND DEVICE_MODEL DEVICE_SOC DEVICE_PLATFORM \
          ROM_VERSION ROM_REGION SUPER_SLOT_MODE
 
-  _probe_log "═══════════════════════════════════════════"
-  _probe_log "Device codename : $DEVICE_CODENAME"
+  _probe_log "══════════════════════════════════════════"
+  _probe_log "Device codename : $DEVICE_CODENAME${CODENAME_LOCKED:+ (locked by user)}"
   _probe_log "Brand           : ${DEVICE_BRAND:-unknown}"
   _probe_log "Model           : ${DEVICE_MODEL:-unknown}"
   _probe_log "SoC             : ${DEVICE_SOC:-unknown}"
   _probe_log "Platform        : ${DEVICE_PLATFORM:-unknown}"
-  _probe_log "Slot mode       : ${SUPER_SLOT_MODE:-auto}"
+  _probe_log "Slot mode       : ${SUPER_SLOT_MODE:-pending detect_slot_mode}"
   _probe_log "ROM version     : ${ROM_VERSION:-unknown}"
   _probe_log "ROM region      : ${ROM_REGION:-auto}"
-  _probe_log "═══════════════════════════════════════════"
+  _probe_log "══════════════════════════════════════════"
 }
 
 # ---------------------------------------------------------------------------
 # probe_super_metadata — run lpdump on extracted super to fill SUPER_* vars
-#  Called AFTER extract_payload_all_images, BEFORE build_super_image
+#  Called AFTER extract_payload_all_images, BEFORE build_super_image.
+#
+#  SUPER_SIZE is read from the lpdump "Block device table → Size:" field
+#  (exact on-device partition size), NOT from file_size() which may differ
+#  for trimmed / sparse images.
 # ---------------------------------------------------------------------------
 probe_super_metadata() {
   command -v lpdump >/dev/null 2>&1 || {
@@ -444,10 +489,29 @@ probe_super_metadata() {
     _probe_log "Reading super metadata from $candidate"
     lpdump "$candidate" > "$LOGS/lpdump_meta_probe.log" 2>&1 || continue
 
-    local raw_super_size
-    raw_super_size="$(file_size "$candidate")"
+    # ── SUPER_SIZE: parse from block device table (authoritative) ─────────
+    local bdt_size
+    bdt_size="$(_parse_super_size_from_lpdump_log "$LOGS/lpdump_meta_probe.log" || true)"
 
-    SUPER_SIZE="${SUPER_SIZE:-$raw_super_size}"
+    if [[ -n "${bdt_size:-}" ]]; then
+      # Block device table size is always the canonical answer
+      SUPER_SIZE="$bdt_size"
+      _probe_log "SUPER_SIZE=$SUPER_SIZE (from lpdump block device table)"
+    elif [[ -z "${SUPER_SIZE:-}" ]]; then
+      # Fallback: file_size (less accurate for sparse/trimmed images)
+      local file_sz
+      file_sz="$(file_size "$candidate")"
+      SUPER_SIZE="$file_sz"
+      _probe_warn "SUPER_SIZE=$SUPER_SIZE (fallback: file size — verify with 'fastboot getvar partition-size:super')"
+    fi
+
+    # ── SUPER_SIZE_OVERRIDE wins over everything if user provided it ──────
+    if [[ -n "${SUPER_SIZE_OVERRIDE:-}" ]]; then
+      SUPER_SIZE="$SUPER_SIZE_OVERRIDE"
+      _probe_log "SUPER_SIZE=$SUPER_SIZE (overridden by user-supplied SUPER_SIZE_OVERRIDE)"
+    fi
+
+    # ── Other metadata from lpdump ────────────────────────────────────────
     SUPER_METADATA_SIZE="${SUPER_METADATA_SIZE:-$(awk \
       '/Metadata max size:/{for(i=1;i<=NF;i++) if($i~/^[0-9]+$/){print $i; exit}}' \
       "$LOGS/lpdump_meta_probe.log")}"
@@ -468,6 +532,13 @@ probe_super_metadata() {
     return 0
   done
 
-  _probe_warn "No super.img found for metadata probe"
+  # ── No super.img found — check for SUPER_SIZE_OVERRIDE ───────────────────
+  if [[ -n "${SUPER_SIZE_OVERRIDE:-}" ]] && [[ -z "${SUPER_SIZE:-}" ]]; then
+    SUPER_SIZE="$SUPER_SIZE_OVERRIDE"
+    export SUPER_SIZE
+    _probe_log "No super.img found; using SUPER_SIZE_OVERRIDE=$SUPER_SIZE"
+  fi
+
+  _probe_warn "No super.img found for metadata probe — super data may come from device profile"
   return 0
 }

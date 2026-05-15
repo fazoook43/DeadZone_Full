@@ -9,9 +9,17 @@ on:
         default: "https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS3.0.303.0.WNOCNXM/zircon-ota_full-OS3.0.303.0.WNOCNXM-user-16.0-09c35a83d6.zip"
         type: string
       device_codename:
-        description: "Device codename (e.g. garnet). Use 'auto' to detect from OTA automatically."
+        description: "Device codename — enter manually (e.g. sweet, garnet, marble). This value is NEVER auto-overridden by the script."
+        required: true
+        type: string
+      super_size_override:
+        description: |
+          super partition size in bytes (OPTIONAL — leave blank to auto-detect from lpdump).
+          Only needed when lpdump cannot read the super.img metadata.
+          Example values: 9663676416 (9 GiB), 6442450944 (6 GiB), 13958643712 (13 GiB).
+          Get the exact value with: fastboot getvar partition-size:super
         required: false
-        default: "auto"
+        default: ""
         type: string
       build_name:
         description: "Build name"
@@ -174,6 +182,8 @@ jobs:
           UPLOAD_PIXELDRAIN: ${{ github.event.inputs.upload_pixeldrain }}
           NOTIFY_TELEGRAM: ${{ github.event.inputs.notify_telegram }}
           CREATE_GITHUB_RELEASE: ${{ github.event.inputs.create_github_release }}
+          # SUPER_SIZE_OVERRIDE: passed only when user filled the field
+          SUPER_SIZE_OVERRIDE: ${{ github.event.inputs.super_size_override }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

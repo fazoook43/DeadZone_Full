@@ -75,17 +75,25 @@ main() {
   local rom_url="${1:-${ROM_URL:-}}"
 
   # ── DEVICE_CODENAME ────────────────────────────────────────────────────────
-  # If the user passes "auto" or leaves it empty we probe the OTA itself.
-  # Any other value is treated as a hint that may be overridden by the probe.
-  local raw_codename="${2:-${DEVICE_CODENAME:-auto}}"
-  if [[ "$raw_codename" == "auto" || -z "$raw_codename" ]]; then
-    export DEVICE_CODENAME=""          # probe will fill this
-    export DEVICE_PROBE_AUTO="true"
-  else
-    export DEVICE_CODENAME="${raw_codename,,}"   # lowercase
-    export DEVICE_PROBE_AUTO="${DEVICE_PROBE_AUTO:-true}"
-  fi
+  # Policy:
+  #   "auto" or empty → full auto-detection (probe fills codename from OTA)
+  #   Any other value → CODENAME_LOCKED=true; probe fills metadata but NEVER
+  #                     changes DEVICE_CODENAME to what it finds in the OTA.
+  #
+  # This prevents silent wrong-device builds when the OTA filename/metadata
+  # disagrees with the user's explicit choice.
   # ──────────────────────────────────────────────────────────────────────────
+  local raw_codename="${2:-${DEVICE_CODENAME:-}}"
+
+  if [[ -z "$raw_codename" || "$raw_codename" == "auto" ]]; then
+    export DEVICE_CODENAME=""
+    export CODENAME_LOCKED="false"
+    log "Codename: auto-detect mode"
+  else
+    export DEVICE_CODENAME="${raw_codename,,}"   # normalize to lowercase
+    export CODENAME_LOCKED="true"
+    log "Codename: locked to '$DEVICE_CODENAME' (user-supplied — will not be auto-overridden)"
+  fi
 
   export SKIP_PATCHES="${3:-${SKIP_PATCHES:-true}}"
   export OUTPUT_TYPE="${4:-${OUTPUT_TYPE:-super_zst}}"
@@ -101,6 +109,20 @@ main() {
   export CREATE_GITHUB_RELEASE="${CREATE_GITHUB_RELEASE:-false}"
   export VBMETA_PATCH_STRATEGY="${VBMETA_PATCH_STRATEGY:-binary}"
 
+  # ── SUPER_SIZE manual override ─────────────────────────────────────────────
+  # If the user supplied SUPER_SIZE_OVERRIDE (from workflow input), it will be
+  # used by probe_super_metadata() when lpdump cannot auto-detect the value.
+  # The value must be in bytes (e.g. 9663676416 for a 9 GiB super partition).
+  # Leave empty to rely entirely on auto-detection from lpdump.
+  export SUPER_SIZE_OVERRIDE="${SUPER_SIZE_OVERRIDE:-}"
+  if [[ -n "$SUPER_SIZE_OVERRIDE" ]]; then
+    # Validate: must be a plain integer > 1 MiB
+    if ! [[ "$SUPER_SIZE_OVERRIDE" =~ ^[0-9]+$ ]] || (( SUPER_SIZE_OVERRIDE < 1048576 )); then
+      die "SUPER_SIZE_OVERRIDE='$SUPER_SIZE_OVERRIDE' is invalid — must be an integer number of bytes (e.g. 9663676416)"
+    fi
+    log "SUPER_SIZE_OVERRIDE=$SUPER_SIZE_OVERRIDE (will be used if lpdump cannot auto-detect)"
+  fi
+
   [[ -n "$rom_url" ]] || die \
     "Usage: ./main.sh <ROM_URL> [DEVICE_CODENAME|auto] [SKIP_PATCHES] [OUTPUT_TYPE] [FS_MODE] [VBMETA_MODE] [PATCH_LEVEL]"
 
@@ -114,14 +136,15 @@ main() {
 
   # ── Setup ──────────────────────────────────────────────────────────────────
   section "DeadZone ROM Kitchen"
-  log "ROM URL           : $rom_url"
-  log "Skip patches      : $SKIP_PATCHES"
-  log "Output type       : $OUTPUT_TYPE"
-  log "fs_mode           : $FS_MODE"
-  log "vbmeta_mode       : $VBMETA_MODE"
-  log "vbmeta_strategy   : $VBMETA_PATCH_STRATEGY"
-  log "patch_level       : $PATCH_LEVEL"
-  log "Device probe auto : $DEVICE_PROBE_AUTO"
+  log "ROM URL             : $rom_url"
+  log "Device codename     : ${DEVICE_CODENAME:-<auto>} (locked=${CODENAME_LOCKED})"
+  log "SUPER_SIZE_OVERRIDE : ${SUPER_SIZE_OVERRIDE:-<auto-detect>}"
+  log "Skip patches        : $SKIP_PATCHES"
+  log "Output type         : $OUTPUT_TYPE"
+  log "fs_mode             : $FS_MODE"
+  log "vbmeta_mode         : $VBMETA_MODE"
+  log "vbmeta_strategy     : $VBMETA_PATCH_STRATEGY"
+  log "patch_level         : $PATCH_LEVEL"
 
   prepare_env
   load_device_defaults
@@ -132,8 +155,8 @@ main() {
   detect_rom_version "$rom_url"
   resolve_rom_region "$rom_url"
 
-  # ── Phase 0: Device Auto-Probe (fast strategies before extraction) ─────────
-  section "Device Auto-Probe"
+  # ── Phase 0: Device probe (fast — before extraction) ──────────────────────
+  section "Device Probe (pre-extraction)"
   probe_device_info
 
   # Now we have DEVICE_CODENAME — update zip name
@@ -148,7 +171,7 @@ main() {
   # ── Phase 1: Load or auto-generate device profile ─────────────────────────
   section "Device Profile"
   if ! load_device_profile; then
-    log "No existing profile for '$DEVICE_CODENAME' — will try auto-generate after extraction"
+    log "No existing profile for '$DEVICE_CODENAME' — will auto-generate after extraction"
   fi
 
   # ── Phase 2: Extract payload ───────────────────────────────────────────────
@@ -158,7 +181,7 @@ main() {
 
   # ── Phase 3: Deep probe — build.prop + super metadata from extracted files ─
   section "Deep Device Probe"
-  _probe_from_build_prop  || true    # now system/ is available
+  _probe_from_build_prop  || true    # system/ is now available
   probe_super_metadata               # reads lpdump from extracted super.img
 
   # Generate conf now if we still don't have one
@@ -166,6 +189,9 @@ main() {
     generate_device_conf || die "Could not create device profile for '$DEVICE_CODENAME'"
     load_device_profile  || die "Missing device profile: devices/$DEVICE_CODENAME.conf"
   fi
+
+  # Mark that profile is loaded so detect_slot_mode trusts it
+  export _DEVICE_PROFILE_LOADED="true"
 
   log "═══ Device Profile Loaded ═══"
   log "Codename    : $DEVICE_CODENAME"
