@@ -387,6 +387,23 @@ detect_slot_mode() {
   export SUPER_SLOT_MODE
 
   _slot_log "Final SUPER_SLOT_MODE='$SUPER_SLOT_MODE' (source: $_SLOT_SOURCE)"
+
+  # ── Opportunistic: capture SUPER_SIZE from payload list if not yet known ──
+  # This runs here so probe_super_metadata has a head-start value even when
+  # no super.img is present (e.g. payload-only OTAs like garnet/HyperOS 2+).
+  if [[ -z "${SUPER_SIZE:-}" ]]; then
+    local payload_list="$LOGS/payload_list.txt"
+    if [[ -s "$payload_list" ]]; then
+      local hdr_sz
+      hdr_sz="$(grep -iE '(super[_-]?(partition[_-]?)?size|super\s+size)[:\s]+[0-9]+' \
+        "$payload_list" 2>/dev/null | grep -oE '[0-9]{7,}' | head -n1 || true)"
+      if [[ -n "${hdr_sz:-}" ]] && (( hdr_sz > 1048576 )); then
+        SUPER_SIZE="$hdr_sz"
+        export SUPER_SIZE
+        _slot_log "Opportunistic SUPER_SIZE=$SUPER_SIZE from payload_list header"
+      fi
+    fi
+  fi
 }
 
 # ---------------------------------------------------------------------------

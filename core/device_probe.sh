@@ -469,6 +469,111 @@ probe_device_info() {
 }
 
 # ---------------------------------------------------------------------------
+# _probe_super_size_from_payload
+#
+#  Extract SUPER_SIZE from payload.bin when no super.img is available.
+#
+#  Method A — payload-dumper-go --list output:
+#    Some versions print a header line like:
+#      "super_partition_size: 9663676416"   or
+#      "super size: 9663676416"
+#    We parse any line that contains "super" and a large integer.
+#
+#  Method B — payload-dumper-go filesystems.txt (if available):
+#    payload-dumper-go sometimes writes filesystems.txt with lines:
+#      super  9663676416
+#
+#  Method C — sum of all partition sizes from --list + 4 MiB overhead:
+#    Last resort. Each partition line has format:
+#      Name: system_a  Size: 1234567890
+#    We sum all active-slot (_a or unsuffixed) sizes and add 4 MiB metadata.
+#    This gives a minimum valid SUPER_SIZE (not the exact on-device value).
+#    Callers SHOULD warn the user to verify with fastboot.
+#
+#  Returns 0 and sets SUPER_SIZE on success.
+# ---------------------------------------------------------------------------
+_probe_super_size_from_payload() {
+  local payload=""
+  for candidate in "$INPUT/ota/payload.bin" "$INPUT/payload.bin"; do
+    [[ -f "$candidate" ]] && payload="$candidate" && break
+  done
+  [[ -n "$payload" ]] || return 1
+  command -v payload-dumper-go >/dev/null 2>&1 || return 1
+
+  local list_out="$LOGS/payload_list.txt"
+  # Reuse existing list output if available (avoid re-running)
+  if [[ ! -s "$list_out" ]]; then
+    payload-dumper-go --list "$payload" > "$list_out" 2>&1 || return 1
+  fi
+  [[ -s "$list_out" ]] || return 1
+
+  # ── Method A: explicit super_partition_size / super size header ───────────
+  local header_size=""
+  header_size="$(grep -iE '(super[_-]?(partition[_-]?)?size|super\s+size)[:\s]+[0-9]+' \
+    "$list_out" 2>/dev/null \
+    | grep -oE '[0-9]{7,}' | head -n1 || true)"
+
+  if [[ -n "$header_size" ]] && (( header_size > 1048576 )); then
+    _probe_log "SUPER_SIZE=$header_size (payload --list header, Method A)"
+    printf '%s' "$header_size"
+    return 0
+  fi
+
+  # ── Method B: filesystems.txt written by payload-dumper-go ───────────────
+  local fs_txt=""
+  for candidate in \
+      "$INPUT/ota/filesystems.txt" \
+      "$INPUT/filesystems.txt" \
+      "$LOGS/filesystems.txt"; do
+    [[ -f "$candidate" ]] && fs_txt="$candidate" && break
+  done
+
+  if [[ -n "$fs_txt" ]]; then
+    local fs_size=""
+    fs_size="$(grep -iE '^super\s+[0-9]+' "$fs_txt" 2>/dev/null \
+      | grep -oE '[0-9]{7,}' | head -n1 || true)"
+    if [[ -n "$fs_size" ]] && (( fs_size > 1048576 )); then
+      _probe_log "SUPER_SIZE=$fs_size (filesystems.txt, Method B)"
+      printf '%s' "$fs_size"
+      return 0
+    fi
+  fi
+
+  # ── Method C: sum of active-slot partition sizes + metadata overhead ──────
+  # Parse lines like:
+  #   system_a: 1234567890 bytes
+  #   Name: system_a   Size: 1234567890
+  #   system.img 1234567890
+  local total=0
+  local part_count=0
+
+  while IFS= read -r line; do
+    # Skip lines that clearly refer to _b slot
+    [[ "$line" =~ _b[[:space:]:] ]] && continue
+    [[ "$line" =~ _b\.img ]]        && continue
+
+    local sz=""
+    sz="$(printf '%s\n' "$line" | grep -oE '[0-9]{7,}' | head -n1 || true)"
+    if [[ -n "$sz" ]] && (( sz > 1048576 )); then
+      total=$(( total + sz ))
+      (( part_count++ )) || true
+    fi
+  done < "$list_out"
+
+  if (( total > 1048576 && part_count > 0 )); then
+    # Add 4 MiB metadata overhead (lpmake minimum)
+    local estimated=$(( total + 4 * 1024 * 1024 ))
+    # Round up to nearest 512 KiB boundary for alignment safety
+    estimated=$(( (estimated + 524287) / 524288 * 524288 ))
+    _probe_warn "SUPER_SIZE=$estimated (estimated from partition sum, Method C — verify with: fastboot getvar partition-size:super)"
+    printf '%s' "$estimated"
+    return 0
+  fi
+
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # probe_super_metadata — run lpdump on extracted super to fill SUPER_* vars
 #  Called AFTER extract_payload_all_images, BEFORE build_super_image.
 #
@@ -532,11 +637,24 @@ probe_super_metadata() {
     return 0
   done
 
-  # ── No super.img found — check for SUPER_SIZE_OVERRIDE ───────────────────
-  if [[ -n "${SUPER_SIZE_OVERRIDE:-}" ]] && [[ -z "${SUPER_SIZE:-}" ]]; then
+  # ── No super.img found — attempt payload-based SUPER_SIZE extraction ─────
+  if [[ -z "${SUPER_SIZE:-}" ]]; then
+    _probe_log "No super.img found — trying payload-based SUPER_SIZE extraction"
+    local payload_sz=""
+    payload_sz="$(_probe_super_size_from_payload || true)"
+    if [[ -n "${payload_sz:-}" ]]; then
+      SUPER_SIZE="$payload_sz"
+      export SUPER_SIZE
+    fi
+  fi
+
+  # ── SUPER_SIZE_OVERRIDE always wins when user provided it ─────────────────
+  if [[ -n "${SUPER_SIZE_OVERRIDE:-}" ]]; then
     SUPER_SIZE="$SUPER_SIZE_OVERRIDE"
     export SUPER_SIZE
-    _probe_log "No super.img found; using SUPER_SIZE_OVERRIDE=$SUPER_SIZE"
+    _probe_log "SUPER_SIZE=$SUPER_SIZE (user-supplied SUPER_SIZE_OVERRIDE — authoritative)"
+  elif [[ -n "${SUPER_SIZE:-}" ]]; then
+    _probe_log "No super.img found; SUPER_SIZE=$SUPER_SIZE (from payload extraction)"
   fi
 
   _probe_warn "No super.img found for metadata probe — super data may come from device profile"

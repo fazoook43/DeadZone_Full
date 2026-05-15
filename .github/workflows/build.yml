@@ -14,10 +14,20 @@ on:
         type: string
       super_size_override:
         description: |
-          super partition size in bytes (OPTIONAL — leave blank to auto-detect from lpdump).
-          Only needed when lpdump cannot read the super.img metadata.
-          Example values: 9663676416 (9 GiB), 6442450944 (6 GiB), 13958643712 (13 GiB).
-          Get the exact value with: fastboot getvar partition-size:super
+          super partition size in BYTES — leave blank to auto-detect from payload/lpdump.
+          ─────────────────────────────────────────────────────────────────────
+          Fill this ONLY if the build fails with "SUPER_SIZE unknown".
+          Get the exact value on your device:  fastboot getvar partition-size:super
+          ─────────────────────────────────────────────────────────────────────
+          Common values:
+            4294967296   →  4 GiB   (budget A-only devices)
+            6442450944   →  6 GiB
+            8589934592   →  8 GiB   (Redmi Note 11 / 12 series)
+            9126805504   →  8.5 GiB
+            9663676416   →  9 GiB   (Redmi Note 10, Poco X3)
+            10737418240  → 10 GiB
+            13958643712  → 13 GiB   (Mi 11 / 12 flagship)
+          ─────────────────────────────────────────────────────────────────────
         required: false
         default: ""
         type: string
