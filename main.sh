@@ -14,9 +14,9 @@ export PATH="$BIN:$PATH"
 
 source "$WORKSPACE/core/utils.sh"
 source "$WORKSPACE/core/deadzone_config.sh"
-source "$WORKSPACE/core/device_probe.sh"
-source "$WORKSPACE/core/slot_detect.sh"
 source "$WORKSPACE/core/unpacker.sh"
+source "$WORKSPACE/core/fastboot_unpacker.sh"
+source "$WORKSPACE/core/partition_layout_detector.sh"
 source "$WORKSPACE/core/repacker.sh"
 source "$WORKSPACE/core/fs_detect.sh"
 source "$WORKSPACE/core/collect_images.sh"
@@ -37,7 +37,8 @@ _err_trap() {
 trap _err_trap ERR
 
 run_step() {
-  local name="$1"; shift
+  local name="$1"
+  shift
   log "STEP: $name start"
   "$@"
   log "STEP: $name done"
@@ -50,189 +51,142 @@ cleanup_for_fastboot_package() {
   esac
 
   section "Fastboot Package Cleanup"
+  log "Disk usage before cleanup"
   df -h || true
   du -sh "$INPUT" "$EXTRACTED" "$OUTPUT" "$OUTPUT/images" "$OUTPUT_FINAL" "$LOGS" 2>/dev/null || true
 
-  [[ -n "${ROM_FILE:-}" && -f "$ROM_FILE" ]] && rm -f "$ROM_FILE"
+  if [[ -n "${ROM_FILE:-}" && -f "$ROM_FILE" ]]; then
+    rm -f "$ROM_FILE"
+    log "Removed downloaded OTA: $ROM_FILE"
+  fi
   rm -rf "$INPUT/ota" "$INPUT/payload.bin"
 
   local part
   for part in $DYNAMIC_PARTITIONS; do
     rm -f \
-      "$EXTRACTED/$part.img"         "$EXTRACTED/${part}.raw.img" \
-      "$EXTRACTED/${part}_a.img"     "$EXTRACTED/${part}_a.raw.img" \
-      "$EXTRACTED/${part}_b.img"     "$EXTRACTED/${part}_b.raw.img"
+      "$EXTRACTED/$part.img" \
+      "$EXTRACTED/${part}.raw.img" \
+      "$EXTRACTED/${part}_a.img" \
+      "$EXTRACTED/${part}_a.raw.img" \
+      "$EXTRACTED/${part}_b.img" \
+      "$EXTRACTED/${part}_b.raw.img"
   done
 
   find "$OUTPUT" -maxdepth 1 -type f -name 'super.img.zst' -delete 2>/dev/null || true
   [[ -s "$OUTPUT/images/super.img" ]] || die "cleanup removed output/images/super.img"
 
+  log "Disk usage after cleanup"
   df -h || true
   du -sh "$INPUT" "$EXTRACTED" "$OUTPUT" "$OUTPUT/images" "$OUTPUT_FINAL" "$LOGS" 2>/dev/null || true
 }
 
 main() {
   local rom_url="${1:-${ROM_URL:-}}"
-
-  # ── DEVICE_CODENAME ────────────────────────────────────────────────────────
-  # Policy:
-  #   "auto" or empty → full auto-detection (probe fills codename from OTA)
-  #   Any other value → CODENAME_LOCKED=true; probe fills metadata but NEVER
-  #                     changes DEVICE_CODENAME to what it finds in the OTA.
-  #
-  # This prevents silent wrong-device builds when the OTA filename/metadata
-  # disagrees with the user's explicit choice.
-  # ──────────────────────────────────────────────────────────────────────────
-  local raw_codename="${2:-${DEVICE_CODENAME:-}}"
-
-  if [[ -z "$raw_codename" || "$raw_codename" == "auto" ]]; then
-    export DEVICE_CODENAME=""
-    export CODENAME_LOCKED="false"
-    log "Codename: auto-detect mode"
-  else
-    export DEVICE_CODENAME="${raw_codename,,}"   # normalize to lowercase
-    export CODENAME_LOCKED="true"
-    log "Codename: locked to '$DEVICE_CODENAME' (user-supplied — will not be auto-overridden)"
-  fi
-
+  export DEVICE_CODENAME="${2:-${DEVICE_CODENAME:-}}"
   export SKIP_PATCHES="${3:-${SKIP_PATCHES:-true}}"
   export OUTPUT_TYPE="${4:-${OUTPUT_TYPE:-super_zst}}"
   export FS_MODE="${5:-${FS_MODE:-erofs}}"
   export VBMETA_MODE="${6:-${VBMETA_MODE:-3}}"
   export PATCH_LEVEL="${7:-${PATCH_LEVEL:-none}}"
+  # INPUT_TYPE: ota_zip (default) | fastboot_zip
+  # ota_zip      → standard OTA with payload.bin inside
+  # fastboot_zip → Fastboot package with images/super.img (no payload.bin)
+  export INPUT_TYPE="${INPUT_TYPE:-ota_zip}"
   export BUILD_NAME="${BUILD_NAME:-DeadZone_v1}"
   export ZIP_PRESET="${ZIP_PRESET:-DeadZone_Gaming_V1}"
   export FINAL_ZIP_NAME="${FINAL_ZIP_NAME:-}"
   export ROM_REGION="${ROM_REGION:-auto}"
+  resolve_final_zip_name
   export UPLOAD_PIXELDRAIN="${UPLOAD_PIXELDRAIN:-false}"
   export NOTIFY_TELEGRAM="${NOTIFY_TELEGRAM:-false}"
   export CREATE_GITHUB_RELEASE="${CREATE_GITHUB_RELEASE:-false}"
-  export VBMETA_PATCH_STRATEGY="${VBMETA_PATCH_STRATEGY:-binary}"
+  export VBMETA_PATCH_STRATEGY="${VBMETA_PATCH_STRATEGY:-}"
 
-  # ── SUPER_SIZE manual override ─────────────────────────────────────────────
-  # If the user supplied SUPER_SIZE_OVERRIDE (from workflow input), it will be
-  # used by probe_super_metadata() when lpdump cannot auto-detect the value.
-  # The value must be in bytes (e.g. 9663676416 for a 9 GiB super partition).
-  # Leave empty to rely entirely on auto-detection from lpdump.
-  export SUPER_SIZE_OVERRIDE="${SUPER_SIZE_OVERRIDE:-}"
-  if [[ -n "$SUPER_SIZE_OVERRIDE" ]]; then
-    # Validate: must be a plain integer > 1 MiB
-    if ! [[ "$SUPER_SIZE_OVERRIDE" =~ ^[0-9]+$ ]] || (( SUPER_SIZE_OVERRIDE < 1048576 )); then
-      die "SUPER_SIZE_OVERRIDE='$SUPER_SIZE_OVERRIDE' is invalid — must be an integer number of bytes (e.g. 9663676416)"
-    fi
-    log "SUPER_SIZE_OVERRIDE=$SUPER_SIZE_OVERRIDE (will be used if lpdump cannot auto-detect)"
-  fi
-
-  [[ -n "$rom_url" ]] || die \
-    "Usage: ./main.sh <ROM_URL> [DEVICE_CODENAME|auto] [SKIP_PATCHES] [OUTPUT_TYPE] [FS_MODE] [VBMETA_MODE] [PATCH_LEVEL]"
-
+  [[ -n "$rom_url" ]] || die "Usage: ./main.sh <ROM_URL> <DEVICE_CODENAME> [SKIP_PATCHES] [OUTPUT_TYPE] [FS_MODE] [VBMETA_MODE] [PATCH_LEVEL]"
+  [[ -n "$DEVICE_CODENAME" ]] || die "device_codename is required"
   case "$OUTPUT_TYPE" in
     super_zst|fastboot_zip|full_release) ;;
     *) die "Unsupported output_type=$OUTPUT_TYPE" ;;
   esac
-  case "$FS_MODE"     in preserve|erofs)   ;; *) die "Unsupported fs_mode=$FS_MODE"     ;; esac
-  case "$VBMETA_MODE" in 0|1|2|3)         ;; *) die "Unsupported vbmeta_mode=$VBMETA_MODE" ;; esac
-  case "$PATCH_LEVEL" in none|safe|full)   ;; *) die "Unsupported patch_level=$PATCH_LEVEL"  ;; esac
+  case "$INPUT_TYPE" in
+    ota_zip|fastboot_zip) ;;
+    *) die "Unsupported INPUT_TYPE=$INPUT_TYPE (use ota_zip or fastboot_zip)" ;;
+  esac
+  case "$FS_MODE" in preserve|erofs) ;; *) die "Unsupported fs_mode=$FS_MODE" ;; esac
+  case "$VBMETA_MODE" in 0|1|2|3) ;; *) die "Unsupported vbmeta_mode=$VBMETA_MODE" ;; esac
+  case "$PATCH_LEVEL" in none|safe|full) ;; *) die "Unsupported patch_level=$PATCH_LEVEL" ;; esac
+  if [[ -z "$VBMETA_PATCH_STRATEGY" ]]; then
+    case "$OUTPUT_TYPE" in
+      fastboot_zip|full_release|super_zst) VBMETA_PATCH_STRATEGY=binary ;;
+      *) VBMETA_PATCH_STRATEGY=binary ;;
+    esac
+    export VBMETA_PATCH_STRATEGY
+  fi
 
-  # ── Setup ──────────────────────────────────────────────────────────────────
   section "DeadZone ROM Kitchen"
-  log "ROM URL             : $rom_url"
-  log "Device codename     : ${DEVICE_CODENAME:-<auto>} (locked=${CODENAME_LOCKED})"
-  log "SUPER_SIZE_OVERRIDE : ${SUPER_SIZE_OVERRIDE:-<auto-detect>}"
-  log "Skip patches        : $SKIP_PATCHES"
-  log "Output type         : $OUTPUT_TYPE"
-  log "fs_mode             : $FS_MODE"
-  log "vbmeta_mode         : $VBMETA_MODE"
-  log "vbmeta_strategy     : $VBMETA_PATCH_STRATEGY"
-  log "patch_level         : $PATCH_LEVEL"
+  log "Device codename : $DEVICE_CODENAME"
+  log "Input type      : $INPUT_TYPE"
+  log "Build name      : $BUILD_NAME"
+  log "Skip patches    : $SKIP_PATCHES"
+  log "Output type     : $OUTPUT_TYPE"
+  log "fs_mode         : $FS_MODE"
+  log "vbmeta_mode     : $VBMETA_MODE"
+  log "vbmeta_strategy : $VBMETA_PATCH_STRATEGY"
+  log "patch_level     : $PATCH_LEVEL"
 
   prepare_env
   load_device_defaults
-
-  # ── Download ROM ───────────────────────────────────────────────────────────
+  load_device_profile || die "Missing device profile: devices/$DEVICE_CODENAME.conf"
   fetch_rom "$rom_url"
   export ROM_URL="$rom_url"
   detect_rom_version "$rom_url"
   resolve_rom_region "$rom_url"
+  log "ROM region: $ROM_REGION"
+  log "Final ZIP name: $(final_zip_name)"
 
-  # ── Phase 0: Device probe (fast — before extraction) ──────────────────────
-  section "Device Probe (pre-extraction)"
-  probe_device_info
+  # ── Extraction phase ──────────────────────────────────────────────────────
+  case "$INPUT_TYPE" in
+    ota_zip)
+      section "Payload Extraction (OTA)"
+      extract_payload_all_images
+      detect_partition_images
+      ;;
+    fastboot_zip)
+      section "Fastboot ZIP Extraction"
+      # 1. Extract all *.img from the fastboot package
+      extract_fastboot_zip
+      # 2. Read real super.img size and LP metadata (overrides profile if needed)
+      read_super_real_size_from_image
+      # 3. Smart slot layout detection (A / A/B / VAB)
+      detect_slot_layout
+      print_slot_layout_summary
+      # 4. Build partitions.tsv from extracted images
+      detect_partition_images_from_fastboot
+      ;;
+  esac
 
-  # Now we have DEVICE_CODENAME — update zip name
-  resolve_final_zip_name
-
-  log "Device codename   : $DEVICE_CODENAME"
-  log "Build name        : $BUILD_NAME"
-  log "ROM region        : $ROM_REGION"
-  log "ROM version       : ${ROM_VERSION:-unknown}"
-  log "Final ZIP name    : $(final_zip_name)"
-
-  # ── Phase 1: Load or auto-generate device profile ─────────────────────────
-  section "Device Profile"
-  if ! load_device_profile; then
-    log "No existing profile for '$DEVICE_CODENAME' — will auto-generate after extraction"
-  fi
-
-  # ── Phase 2: Extract payload ───────────────────────────────────────────────
-  section "Payload Extraction"
-  extract_payload_all_images
   detect_dynamic_filesystems
 
-  # ── Phase 3: Deep probe — build.prop + super metadata from extracted files ─
-  section "Deep Device Probe"
-  _probe_from_build_prop  || true    # system/ is now available
-  probe_super_metadata               # reads lpdump from extracted super.img
-
-  # Generate conf now if we still don't have one
-  if ! load_device_profile 2>/dev/null; then
-    generate_device_conf || die "Could not create device profile for '$DEVICE_CODENAME'"
-    load_device_profile  || die "Missing device profile: devices/$DEVICE_CODENAME.conf"
-  fi
-
-  # Mark that profile is loaded so detect_slot_mode trusts it
-  export _DEVICE_PROFILE_LOADED="true"
-
-  log "═══ Device Profile Loaded ═══"
-  log "Codename    : $DEVICE_CODENAME"
-  log "Brand       : ${DEVICE_BRAND:-unknown}"
-  log "Model       : ${DEVICE_MODEL:-unknown}"
-  log "SoC         : ${DEVICE_SOC:-unknown}"
-  log "SUPER_SIZE  : ${SUPER_SIZE:-unknown}"
-  log "Group size  : ${DYNAMIC_PARTITION_GROUP_SIZE:-unknown}"
-
-  # ── Phase 4: Slot mode detection ──────────────────────────────────────────
-  section "Slot Mode Detection"
-  detect_slot_mode
-  log "Slot mode: $SUPER_SLOT_MODE — $(describe_slot_mode)"
-
-  detect_partition_images
-
-  # ── Phase 5: Patches ──────────────────────────────────────────────────────
   if [[ "$SKIP_PATCHES" != "true" && "$PATCH_LEVEL" != "none" ]]; then
     run_step apply_patches apply_patches
     detect_dynamic_filesystems
   fi
 
-  # ── Phase 6: Super build ───────────────────────────────────────────────────
   section "Super Build"
   build_super_image
   validate_super_image
 
-  # ── Phase 7: Output ───────────────────────────────────────────────────────
   if [[ "$OUTPUT_TYPE" == "fastboot_zip" || "$OUTPUT_TYPE" == "full_release" ]]; then
     cleanup_for_fastboot_package
     section "Fastboot Package"
-    run_step collect_fastboot_images  collect_fastboot_images
-    run_step patch_vbmeta_images      patch_vbmeta_images
-    run_step package_fastboot_zip     package_fastboot_zip
-    run_step validate_build           validate_build
-    if [[ "$CREATE_GITHUB_RELEASE" == "true" || \
-          "$UPLOAD_PIXELDRAIN"    == "true"  || \
-          "$NOTIFY_TELEGRAM"      == "true"  ]]; then
+    run_step collect_fastboot_images collect_fastboot_images
+    run_step patch_vbmeta_images patch_vbmeta_images
+    run_step package_fastboot_zip package_fastboot_zip
+    run_step validate_build validate_build
+    if [[ "$CREATE_GITHUB_RELEASE" == "true" || "$UPLOAD_PIXELDRAIN" == "true" || "$NOTIFY_TELEGRAM" == "true" ]]; then
       section "Release Uploads"
       run_step upload_release_artifacts upload_release_artifacts
-      run_step validate_build           validate_build
+      run_step validate_build validate_build
     fi
   else
     compress_super_image
@@ -240,10 +194,12 @@ main() {
   fi
 
   section "Done"
-  [[ "$OUTPUT_TYPE" == "super_zst" ]] \
-    && log "Output : $OUTPUT/super.img.zst" \
-    || log "Output : $(final_zip_path)"
-  log "Logs   : $LOGS"
+  if [[ "$OUTPUT_TYPE" == "super_zst" ]]; then
+    log "Output path: $OUTPUT/super.img.zst"
+  else
+    log "Output path: $(final_zip_path)"
+  fi
+  log "Logs path: $LOGS"
 }
 
 main "$@"

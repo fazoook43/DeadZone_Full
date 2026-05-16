@@ -9,27 +9,9 @@ on:
         default: "https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS3.0.303.0.WNOCNXM/zircon-ota_full-OS3.0.303.0.WNOCNXM-user-16.0-09c35a83d6.zip"
         type: string
       device_codename:
-        description: "Device codename — enter manually (e.g. sweet, garnet, marble). This value is NEVER auto-overridden by the script."
+        description: "Device codename matching devices/.conf"
         required: true
-        type: string
-      super_size_override:
-        description: |
-          super partition size in BYTES — leave blank to auto-detect from payload/lpdump.
-          ─────────────────────────────────────────────────────────────────────
-          Fill this ONLY if the build fails with "SUPER_SIZE unknown".
-          Get the exact value on your device:  fastboot getvar partition-size:super
-          ─────────────────────────────────────────────────────────────────────
-          Common values:
-            4294967296   →  4 GiB   (budget A-only devices)
-            6442450944   →  6 GiB
-            8589934592   →  8 GiB   (Redmi Note 11 / 12 series)
-            9126805504   →  8.5 GiB
-            9663676416   →  9 GiB   (Redmi Note 10, Poco X3)
-            10737418240  → 10 GiB
-            13958643712  → 13 GiB   (Mi 11 / 12 flagship)
-          ─────────────────────────────────────────────────────────────────────
-        required: false
-        default: ""
+        default: "zircon"
         type: string
       build_name:
         description: "Build name"
@@ -192,8 +174,6 @@ jobs:
           UPLOAD_PIXELDRAIN: ${{ github.event.inputs.upload_pixeldrain }}
           NOTIFY_TELEGRAM: ${{ github.event.inputs.notify_telegram }}
           CREATE_GITHUB_RELEASE: ${{ github.event.inputs.create_github_release }}
-          # SUPER_SIZE_OVERRIDE: passed only when user filled the field
-          SUPER_SIZE_OVERRIDE: ${{ github.event.inputs.super_size_override }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
