@@ -16,7 +16,6 @@ source "$WORKSPACE/core/utils.sh"
 source "$WORKSPACE/core/deadzone_config.sh"
 source "$WORKSPACE/core/unpacker.sh"
 source "$WORKSPACE/core/fastboot_unpacker.sh"
-source "$WORKSPACE/core/partition_layout_detector.sh"
 source "$WORKSPACE/core/repacker.sh"
 source "$WORKSPACE/core/fs_detect.sh"
 source "$WORKSPACE/core/collect_images.sh"
@@ -57,9 +56,9 @@ cleanup_for_fastboot_package() {
 
   if [[ -n "${ROM_FILE:-}" && -f "$ROM_FILE" ]]; then
     rm -f "$ROM_FILE"
-    log "Removed downloaded OTA: $ROM_FILE"
+    log "Removed downloaded ROM: $ROM_FILE"
   fi
-  rm -rf "$INPUT/ota" "$INPUT/payload.bin"
+  rm -rf "$INPUT/ota" "$INPUT/payload.bin" "$INPUT/fastboot"
 
   local part
   for part in $DYNAMIC_PARTITIONS; do
@@ -88,10 +87,7 @@ main() {
   export FS_MODE="${5:-${FS_MODE:-erofs}}"
   export VBMETA_MODE="${6:-${VBMETA_MODE:-3}}"
   export PATCH_LEVEL="${7:-${PATCH_LEVEL:-none}}"
-  # INPUT_TYPE: ota_zip (default) | fastboot_zip
-  # ota_zip      → standard OTA with payload.bin inside
-  # fastboot_zip → Fastboot package with images/super.img (no payload.bin)
-  export INPUT_TYPE="${INPUT_TYPE:-ota_zip}"
+  export ROM_TYPE="${8:-${ROM_TYPE:-ota}}"
   export BUILD_NAME="${BUILD_NAME:-DeadZone_v1}"
   export ZIP_PRESET="${ZIP_PRESET:-DeadZone_Gaming_V1}"
   export FINAL_ZIP_NAME="${FINAL_ZIP_NAME:-}"
@@ -102,95 +98,130 @@ main() {
   export CREATE_GITHUB_RELEASE="${CREATE_GITHUB_RELEASE:-false}"
   export VBMETA_PATCH_STRATEGY="${VBMETA_PATCH_STRATEGY:-}"
 
-  [[ -n "$rom_url" ]] || die "Usage: ./main.sh <ROM_URL> <DEVICE_CODENAME> [SKIP_PATCHES] [OUTPUT_TYPE] [FS_MODE] [VBMETA_MODE] [PATCH_LEVEL]"
+  [[ -n "$rom_url" ]] || die "Usage: ./main.sh <ROM_URL> <DEVICE_CODENAME> [SKIP_PATCHES] [OUTPUT_TYPE] [FS_MODE] [VBMETA_MODE] [PATCH_LEVEL] [ROM_TYPE]"
   [[ -n "$DEVICE_CODENAME" ]] || die "device_codename is required"
   case "$OUTPUT_TYPE" in
     super_zst|fastboot_zip|full_release) ;;
     *) die "Unsupported output_type=$OUTPUT_TYPE" ;;
   esac
-  case "$INPUT_TYPE" in
-    ota_zip|fastboot_zip) ;;
-    *) die "Unsupported INPUT_TYPE=$INPUT_TYPE (use ota_zip or fastboot_zip)" ;;
-  esac
   case "$FS_MODE" in preserve|erofs) ;; *) die "Unsupported fs_mode=$FS_MODE" ;; esac
   case "$VBMETA_MODE" in 0|1|2|3) ;; *) die "Unsupported vbmeta_mode=$VBMETA_MODE" ;; esac
   case "$PATCH_LEVEL" in none|safe|full) ;; *) die "Unsupported patch_level=$PATCH_LEVEL" ;; esac
+  case "$ROM_TYPE" in ota|fastboot) ;; *) die "Unsupported rom_type=$ROM_TYPE. Use ota or fastboot" ;; esac
   if [[ -z "$VBMETA_PATCH_STRATEGY" ]]; then
-    case "$OUTPUT_TYPE" in
-      fastboot_zip|full_release|super_zst) VBMETA_PATCH_STRATEGY=binary ;;
-      *) VBMETA_PATCH_STRATEGY=binary ;;
-    esac
+    VBMETA_PATCH_STRATEGY=binary
     export VBMETA_PATCH_STRATEGY
   fi
 
   section "DeadZone ROM Kitchen"
-  log "Device codename : $DEVICE_CODENAME"
-  log "Input type      : $INPUT_TYPE"
-  log "Build name      : $BUILD_NAME"
-  log "Skip patches    : $SKIP_PATCHES"
-  log "Output type     : $OUTPUT_TYPE"
-  log "fs_mode         : $FS_MODE"
-  log "vbmeta_mode     : $VBMETA_MODE"
-  log "vbmeta_strategy : $VBMETA_PATCH_STRATEGY"
-  log "patch_level     : $PATCH_LEVEL"
+  log "Device codename  : $DEVICE_CODENAME"
+  log "ROM type         : $ROM_TYPE"
+  log "Build name       : $BUILD_NAME"
+  log "Skip patches     : $SKIP_PATCHES"
+  log "Output type      : $OUTPUT_TYPE"
+  log "fs_mode          : $FS_MODE"
+  log "vbmeta_mode      : $VBMETA_MODE"
+  log "vbmeta_strategy  : $VBMETA_PATCH_STRATEGY"
+  log "patch_level      : $PATCH_LEVEL"
 
   prepare_env
   load_device_defaults
-  load_device_profile || die "Missing device profile: devices/$DEVICE_CODENAME.conf"
-  fetch_rom "$rom_url"
-  export ROM_URL="$rom_url"
-  detect_rom_version "$rom_url"
-  resolve_rom_region "$rom_url"
-  log "ROM region: $ROM_REGION"
-  log "Final ZIP name: $(final_zip_name)"
 
-  # ── Extraction phase ──────────────────────────────────────────────────────
-  case "$INPUT_TYPE" in
-    ota_zip)
-      section "Payload Extraction (OTA)"
-      extract_payload_all_images
-      detect_partition_images
-      ;;
-    fastboot_zip)
-      section "Fastboot ZIP Extraction"
-      # 1. Extract all *.img from the fastboot package
-      extract_fastboot_zip
-      # 2. Read real super.img size and LP metadata (overrides profile if needed)
-      read_super_real_size_from_image
-      # 3. Smart slot layout detection (A / A/B / VAB)
-      detect_slot_layout
-      print_slot_layout_summary
-      # 4. Build partitions.tsv from extracted images
-      detect_partition_images_from_fastboot
-      ;;
-  esac
+  # =========================================================================
+  # ROM_TYPE=fastboot  →  new fastboot ZIP pipeline (auto-detects everything)
+  # ROM_TYPE=ota       →  existing OTA payload.bin pipeline (needs devices/*.conf)
+  # =========================================================================
+  if [[ "$ROM_TYPE" == "fastboot" ]]; then
 
-  detect_dynamic_filesystems
+    # Device config is OPTIONAL for fastboot — lpdump auto-detects everything.
+    # If a matching conf exists, it is loaded first; lpdump values always win.
+    load_device_profile || log "No device profile — will auto-detect all values from super.img"
 
-  if [[ "$SKIP_PATCHES" != "true" && "$PATCH_LEVEL" != "none" ]]; then
-    run_step apply_patches apply_patches
+    fetch_rom "$rom_url"
+    export ROM_URL="$rom_url"
+    detect_rom_version "$rom_url"
+    resolve_rom_region "$rom_url"
+    log "ROM region: $ROM_REGION"
+    log "Final ZIP name: $(final_zip_name)"
+
+    # Full fastboot ingestion: detect → extract → verify size → read lpdump
+    # → lpunpack → detect naming → build partitions.tsv → extract other images
+    ingest_fastboot_rom
+
     detect_dynamic_filesystems
-  fi
 
-  section "Super Build"
-  build_super_image
-  validate_super_image
-
-  if [[ "$OUTPUT_TYPE" == "fastboot_zip" || "$OUTPUT_TYPE" == "full_release" ]]; then
-    cleanup_for_fastboot_package
-    section "Fastboot Package"
-    run_step collect_fastboot_images collect_fastboot_images
-    run_step patch_vbmeta_images patch_vbmeta_images
-    run_step package_fastboot_zip package_fastboot_zip
-    run_step validate_build validate_build
-    if [[ "$CREATE_GITHUB_RELEASE" == "true" || "$UPLOAD_PIXELDRAIN" == "true" || "$NOTIFY_TELEGRAM" == "true" ]]; then
-      section "Release Uploads"
-      run_step upload_release_artifacts upload_release_artifacts
-      run_step validate_build validate_build
+    if [[ "$SKIP_PATCHES" != "true" && "$PATCH_LEVEL" != "none" ]]; then
+      run_step apply_patches apply_patches
+      detect_dynamic_filesystems
     fi
+
+    section "Super Build"
+    build_super_image
+    validate_super_image
+
+    if [[ "$OUTPUT_TYPE" == "fastboot_zip" || "$OUTPUT_TYPE" == "full_release" ]]; then
+      cleanup_for_fastboot_package
+      section "Fastboot Package"
+      run_step collect_fastboot_images collect_fastboot_images
+      run_step patch_vbmeta_images     patch_vbmeta_images
+      run_step package_fastboot_zip    package_fastboot_zip
+      run_step validate_build          validate_build
+      # Generate ready-to-use device config as part of the deliverables
+      run_step generate_device_config  generate_fastboot_device_config
+      if [[ "$CREATE_GITHUB_RELEASE" == "true" || "$UPLOAD_PIXELDRAIN" == "true" || "$NOTIFY_TELEGRAM" == "true" ]]; then
+        section "Release Uploads"
+        run_step upload_release_artifacts upload_release_artifacts
+        run_step validate_build           validate_build
+      fi
+    else
+      compress_super_image
+      validate_super_zst
+      run_step generate_device_config generate_fastboot_device_config
+    fi
+
   else
-    compress_super_image
-    validate_super_zst
+
+    # OTA payload.bin path — unchanged
+    load_device_profile || die "Missing device profile: devices/$DEVICE_CODENAME.conf"
+
+    fetch_rom "$rom_url"
+    export ROM_URL="$rom_url"
+    detect_rom_version "$rom_url"
+    resolve_rom_region "$rom_url"
+    log "ROM region: $ROM_REGION"
+    log "Final ZIP name: $(final_zip_name)"
+
+    section "Payload Extraction"
+    extract_payload_all_images
+    detect_partition_images
+    detect_dynamic_filesystems
+
+    if [[ "$SKIP_PATCHES" != "true" && "$PATCH_LEVEL" != "none" ]]; then
+      run_step apply_patches apply_patches
+      detect_dynamic_filesystems
+    fi
+
+    section "Super Build"
+    build_super_image
+    validate_super_image
+
+    if [[ "$OUTPUT_TYPE" == "fastboot_zip" || "$OUTPUT_TYPE" == "full_release" ]]; then
+      cleanup_for_fastboot_package
+      section "Fastboot Package"
+      run_step collect_fastboot_images collect_fastboot_images
+      run_step patch_vbmeta_images     patch_vbmeta_images
+      run_step package_fastboot_zip    package_fastboot_zip
+      run_step validate_build          validate_build
+      if [[ "$CREATE_GITHUB_RELEASE" == "true" || "$UPLOAD_PIXELDRAIN" == "true" || "$NOTIFY_TELEGRAM" == "true" ]]; then
+        section "Release Uploads"
+        run_step upload_release_artifacts upload_release_artifacts
+        run_step validate_build           validate_build
+      fi
+    else
+      compress_super_image
+      validate_super_zst
+    fi
+
   fi
 
   section "Done"
@@ -198,6 +229,9 @@ main() {
     log "Output path: $OUTPUT/super.img.zst"
   else
     log "Output path: $(final_zip_path)"
+  fi
+  if [[ "$ROM_TYPE" == "fastboot" ]]; then
+    log "Device config  : $OUTPUT_FINAL/detected_${DEVICE_CODENAME}.conf"
   fi
   log "Logs path: $LOGS"
 }
